@@ -64,6 +64,15 @@ class TestRunnerService:
             "X-GitHub-Api-Version": "2022-11-28",
         }
 
+    def _extract_error_message(self, resp: httpx.Response) -> str:
+        try:
+            data = resp.json()
+            if isinstance(data, dict):
+                return str(data.get("message", data))
+            return str(data)
+        except Exception:
+            return (resp.text or "").strip()
+
     async def run_tests(self, repo: str, test_code: str, suite_id: str) -> dict:
         """
         Full pipeline: ensure workflow on default branch → create test branch →
@@ -80,15 +89,13 @@ class TestRunnerService:
             # 2. Ensure workflow YAML exists on the DEFAULT branch
             #    (workflow_dispatch REQUIRES the file on the default branch)
             workflow_path = ".github/workflows/octus-tests.yml"
-            workflow_is_new = False
             try:
                 await self._get_file(client, repo, workflow_path, default_branch)
                 logger.info("Workflow YAML already exists on default branch")
-            except Exception:
+            except FileNotFoundError:
                 logger.info("Committing workflow YAML to default branch...")
                 await self._commit_file(client, repo, default_branch, workflow_path,
                                          WORKFLOW_YAML, "[Octus] Add test workflow")
-                workflow_is_new = True
                 # GitHub needs a moment to register new workflows
                 logger.info("Waiting for GitHub to register new workflow...")
                 await asyncio.sleep(5)
@@ -149,7 +156,10 @@ class TestRunnerService:
 
     async def _get_default_branch(self, client, repo: str) -> str:
         resp = await client.get(f"{GITHUB_API}/repos/{repo}", headers=self.headers)
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            raise ValueError(
+                f"Unable to access repository '{repo}': {self._extract_error_message(resp)}"
+            )
         return resp.json().get("default_branch", "main")
 
     async def _get_branch_sha(self, client, repo: str, branch: str) -> str:
@@ -157,7 +167,11 @@ class TestRunnerService:
             f"{GITHUB_API}/repos/{repo}/git/ref/heads/{branch}",
             headers=self.headers,
         )
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            raise ValueError(
+                f"Unable to read branch '{branch}' in '{repo}': "
+                f"{self._extract_error_message(resp)}"
+            )
         return resp.json()["object"]["sha"]
 
     async def _create_branch(self, client, repo: str, branch: str, sha: str):
@@ -167,7 +181,12 @@ class TestRunnerService:
             json={"ref": f"refs/heads/{branch}", "sha": sha},
         )
         if resp.status_code not in (200, 201):
-            raise ValueError(f"Failed to create branch: {resp.text}")
+            msg = self._extract_error_message(resp)
+            if resp.status_code in (401, 403):
+                raise PermissionError(
+                    "GitHub token does not have permission to create branches."
+                )
+            raise ValueError(f"Failed to create branch: {msg}")
 
     async def _get_file(self, client, repo: str, path: str, branch: str) -> dict:
         resp = await client.get(
@@ -175,7 +194,12 @@ class TestRunnerService:
             headers=self.headers,
             params={"ref": branch},
         )
-        resp.raise_for_status()
+        if resp.status_code == 404:
+            raise FileNotFoundError(f"{path} not found on branch {branch}")
+        if resp.status_code != 200:
+            raise ValueError(
+                f"Unable to read '{path}' on '{branch}': {self._extract_error_message(resp)}"
+            )
         return resp.json()
 
     async def _commit_file(self, client, repo: str, branch: str,
@@ -187,7 +211,7 @@ class TestRunnerService:
         try:
             existing = await self._get_file(client, repo, path, branch)
             sha = existing.get("sha")
-        except Exception:
+        except FileNotFoundError:
             pass
 
         body = {
@@ -204,7 +228,20 @@ class TestRunnerService:
             json=body,
         )
         if resp.status_code not in (200, 201):
-            raise ValueError(f"Failed to commit {path}: {resp.text}")
+            msg = self._extract_error_message(resp)
+            lower_msg = msg.lower()
+            if path.startswith(".github/workflows/") and (
+                "workflow scope" in lower_msg or "refusing to allow" in lower_msg
+            ):
+                raise PermissionError(
+                    "GitHub token is missing 'workflow' permission. "
+                    "Recreate token with workflow access and try again."
+                )
+            if resp.status_code in (401, 403):
+                raise PermissionError(
+                    f"GitHub token does not have permission to commit '{path}'."
+                )
+            raise ValueError(f"Failed to commit {path}: {msg}")
 
     async def _trigger_workflow(self, client, repo: str, branch: str, suite_id: str) -> Optional[int]:
         """Trigger workflow_dispatch and return the run ID."""
@@ -215,7 +252,16 @@ class TestRunnerService:
             json={"ref": branch, "inputs": {"suite_id": suite_id}},
         )
         if resp.status_code != 204:
-            raise ValueError(f"Failed to trigger workflow: {resp.text}")
+            msg = self._extract_error_message(resp)
+            if resp.status_code in (401, 403):
+                raise PermissionError(
+                    "GitHub token does not have permission to trigger Actions workflows."
+                )
+            if resp.status_code == 404:
+                raise ValueError(
+                    "Workflow 'octus-tests.yml' was not found or not yet registered."
+                )
+            raise ValueError(f"Failed to trigger workflow: {msg}")
 
         # Wait briefly then find the run
         import asyncio

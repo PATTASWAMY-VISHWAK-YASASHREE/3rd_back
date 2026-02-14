@@ -4,13 +4,14 @@ Test Runner API routes.
 - GET  /tests/runs/{run_id}/status → polls for run status + results
 """
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Header
 from app.services.test_runner_service import TestRunnerService
 from app.services.export_service import ExportService
 from app.store.database import get_session
 from app.store.repository import TestSuiteRepository
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import Depends
+from typing import Optional
 
 import logging
 
@@ -23,7 +24,8 @@ router = APIRouter(prefix="/tests", tags=["Test Runner"])
 async def run_tests(
     suite_id: str,
     repo: str = Query(..., description="GitHub repo (owner/repo)"),
-    token: str = Query(..., description="GitHub access token"),
+    token: Optional[str] = Query(default=None, description="GitHub access token"),
+    x_github_token: Optional[str] = Header(default=None, alias="X-GitHub-Token"),
     session: AsyncSession = Depends(get_session),
 ):
     """
@@ -34,6 +36,13 @@ async def run_tests(
     4. Returns run_id for polling
     """
     try:
+        github_token = x_github_token or token
+        if not github_token:
+            raise HTTPException(
+                status_code=422,
+                detail="Missing GitHub token. Send as query 'token' or header 'X-GitHub-Token'.",
+            )
+
         # Load suite from DB
         repo_db = TestSuiteRepository(session)
         suite_record = await repo_db.get_by_suite_id(suite_id)
@@ -57,13 +66,17 @@ async def run_tests(
         test_code = export_svc.to_pytest(suite_obj)
 
         # Run via GitHub Actions
-        runner = TestRunnerService(token=token)
+        runner = TestRunnerService(token=github_token)
         result = await runner.run_tests(repo, test_code, suite_id)
 
         return result
 
     except HTTPException:
         raise
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         logger.error(f"Test run failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -73,13 +86,27 @@ async def run_tests(
 async def get_run_status(
     run_id: int,
     repo: str = Query(..., description="GitHub repo (owner/repo)"),
-    token: str = Query(..., description="GitHub access token"),
+    token: Optional[str] = Query(default=None, description="GitHub access token"),
+    x_github_token: Optional[str] = Header(default=None, alias="X-GitHub-Token"),
 ):
     """Returns the current status and results of a GitHub Actions workflow run."""
     try:
-        runner = TestRunnerService(token=token)
+        github_token = x_github_token or token
+        if not github_token:
+            raise HTTPException(
+                status_code=422,
+                detail="Missing GitHub token. Send as query 'token' or header 'X-GitHub-Token'.",
+            )
+
+        runner = TestRunnerService(token=github_token)
         result = await runner.get_run_status(repo, run_id)
         return result
+    except HTTPException:
+        raise
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         logger.error(f"Status check failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
