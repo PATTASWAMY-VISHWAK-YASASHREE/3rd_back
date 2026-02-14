@@ -1,0 +1,23 @@
+Return a JSON object with this EXACT structure:
+{
+  "user_story_summary": "<one-line summary>",
+  "test_cases": [
+    {
+      "title": "<descriptive test title>",
+      "scenario_type": "<happy_path|edge_case|negative|boundary|security>",
+      "severity": "<critical|major|minor|trivial>",
+      "preconditions": ["<precondition 1>", "<precondition 2>"],
+      "steps": [
+        {
+          "step_number": 1,
+          "action": "<what the tester does>",
+          "input_data": "<specific test data or null>",
+          "expected_result": "<exact observable outcome>"
+        }
+      ],
+      "tags": ["@smoke", "@regression", "@login"],
+      "is_edge_case": false,
+      "gherkin": "Feature: ...\n  Scenario: ...\n    Given ...\n    When ...\n    Then ..."
+    }
+  ]
+}

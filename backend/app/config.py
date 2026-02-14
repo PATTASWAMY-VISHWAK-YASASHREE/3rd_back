@@ -1,0 +1,46 @@
+from pydantic_settings import BaseSettings
+from typing import Optional
+
+
+class Settings(BaseSettings):
+    gemini_api_key: str
+    gemini_api_keys: str = ""  # comma-separated list of API keys for rotation
+    gemini_model: str = "gemini-2.0-flash"
+    gemini_fallback_models: str = ""  # No fallbacks for free tier entitlement
+    gemini_rpm_limit: int = 15
+    database_url: str = "sqlite+aiosqlite:///./testgen.db"
+    cors_origins: str = "http://localhost:3000,http://localhost:5173"
+    log_level: str = "INFO"
+
+    def get_all_api_keys(self) -> list[str]:
+        """Returns all available API keys (from both GEMINI_API_KEY and GEMINI_API_KEYS)."""
+        keys = set()
+        if self.gemini_api_key:
+            keys.add(self.gemini_api_key.strip())
+        if self.gemini_api_keys:
+            for k in self.gemini_api_keys.split(","):
+                k = k.strip()
+                if k:
+                    keys.add(k)
+        return list(keys)
+
+    # Gemini generation params
+    gemini_temperature: float = 0.3
+    gemini_top_p: float = 0.8
+    gemini_max_output_tokens: int = 8192
+
+    # GitHub Context
+    github_token: Optional[str] = None
+    github_app_id: Optional[str] = None
+    github_client_id: Optional[str] = None
+    github_client_secret: Optional[str] = None
+    github_callback_url: str = "http://localhost:5173/github-callback.html"
+
+    class Config:
+        env_file = ".env"
+        env_file_encoding = "utf-8"
+
+
+def get_settings() -> Settings:
+    """Fresh settings every call — no cache so .env changes take effect on reload."""
+    return Settings()

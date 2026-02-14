@@ -1,0 +1,86 @@
+{% macro example_1() %}
+{
+  "user_story_summary": "Password reset via email",
+  "test_cases": [
+    {
+      "title": "Successful password reset with valid email",
+      "scenario_type": "happy_path",
+      "severity": "critical",
+      "preconditions": ["User has a registered account with email user@test.com", "User is on the login page"],
+      "steps": [
+        {"step_number": 1, "action": "Click 'Forgot Password' link", "input_data": null, "expected_result": "Password reset form is displayed"},
+        {"step_number": 2, "action": "Enter registered email", "input_data": "user@test.com", "expected_result": "Email field accepts input"},
+        {"step_number": 3, "action": "Click 'Send Reset Link'", "input_data": null, "expected_result": "Success message: 'Reset link sent to your email'"},
+        {"step_number": 4, "action": "Check email inbox within 2 minutes", "input_data": null, "expected_result": "Email with reset link is received"}
+      ],
+      "tags": ["@smoke", "@password-reset", "@P0"],
+      "is_edge_case": false,
+      "gherkin": "Feature: Password Reset\n  Scenario: Successful reset with valid email\n    Given the user has a registered account\n    And the user is on the login page\n    When the user clicks 'Forgot Password'\n    And enters 'user@test.com'\n    And clicks 'Send Reset Link'\n    Then a success message is displayed\n    And a reset email is received within 2 minutes"
+    },
+    {
+      "title": "Password reset with unregistered email",
+      "scenario_type": "negative",
+      "severity": "major",
+      "preconditions": ["No account exists for unknown@test.com"],
+      "steps": [
+        {"step_number": 1, "action": "Navigate to password reset form", "input_data": null, "expected_result": "Reset form is displayed"},
+        {"step_number": 2, "action": "Enter unregistered email", "input_data": "unknown@test.com", "expected_result": "Email field accepts input"},
+        {"step_number": 3, "action": "Click 'Send Reset Link'", "input_data": null, "expected_result": "Generic message shown (no info leak about account existence)"}
+      ],
+      "tags": ["@security", "@password-reset", "@negative"],
+      "is_edge_case": false,
+      "gherkin": "Feature: Password Reset\n  Scenario: Reset attempt with unregistered email\n    Given no account exists for 'unknown@test.com'\n    When the user submits the reset form with that email\n    Then a generic message is shown without revealing account existence"
+    },
+    {
+      "title": "Password reset link used after 24-hour expiry",
+      "scenario_type": "edge_case",
+      "severity": "major",
+      "preconditions": ["User requested reset 25 hours ago", "Reset link was received"],
+      "steps": [
+        {"step_number": 1, "action": "Click reset link from email after 25 hours", "input_data": null, "expected_result": "Error page: 'This link has expired'"},
+        {"step_number": 2, "action": "Attempt to set new password on expired page", "input_data": "NewPass123!", "expected_result": "Form submission is blocked or returns expiry error"}
+      ],
+      "tags": ["@edge-case", "@password-reset", "@expiry"],
+      "is_edge_case": true,
+      "gherkin": "Feature: Password Reset\n  Scenario: Expired reset link\n    Given the user requested a reset 25 hours ago\n    When the user clicks the expired reset link\n    Then an expiry error message is displayed"
+    }
+  ]
+}
+{% endmacro %}
+
+{% macro example_2() %}
+{
+  "user_story_summary": "Admin bulk-delete users for account management",
+  "test_cases": [
+    {
+      "title": "Admin successfully bulk-deletes multiple users",
+      "scenario_type": "happy_path",
+      "severity": "critical",
+      "preconditions": ["Admin is logged in", "At least 3 non-admin users exist"],
+      "steps": [
+        {"step_number": 1, "action": "Navigate to User Management page", "input_data": null, "expected_result": "User list is displayed with checkboxes"},
+        {"step_number": 2, "action": "Select 3 users via checkboxes", "input_data": null, "expected_result": "3 users are highlighted, bulk action bar appears"},
+        {"step_number": 3, "action": "Click 'Delete Selected' button", "input_data": null, "expected_result": "Confirmation dialog appears with count of selected users"},
+        {"step_number": 4, "action": "Click 'Confirm Delete'", "input_data": null, "expected_result": "Users are removed from list, success toast shows '3 users deleted'"},
+        {"step_number": 5, "action": "Check audit log", "input_data": null, "expected_result": "Audit log entry shows admin action with timestamp and user IDs"}
+      ],
+      "tags": ["@smoke", "@admin", "@bulk-delete"],
+      "is_edge_case": false,
+      "gherkin": "Feature: Bulk Delete Users\n  Scenario: Successful bulk deletion\n    Given the admin is logged in\n    And at least 3 non-admin users exist\n    When the admin selects 3 users\n    And clicks 'Delete Selected'\n    And confirms the deletion\n    Then the users are removed\n    And a success message is shown\n    And an audit log entry is created"
+    },
+    {
+      "title": "Admin cannot delete their own account via bulk delete",
+      "scenario_type": "negative",
+      "severity": "critical",
+      "preconditions": ["Admin is logged in"],
+      "steps": [
+        {"step_number": 1, "action": "Select own account in user list", "input_data": null, "expected_result": "Own account checkbox is disabled or shows warning"},
+        {"step_number": 2, "action": "Attempt to include self in bulk selection", "input_data": null, "expected_result": "System prevents self-deletion with clear error message"}
+      ],
+      "tags": ["@security", "@admin", "@self-delete-prevention"],
+      "is_edge_case": false,
+      "gherkin": "Feature: Bulk Delete Users\n  Scenario: Admin cannot delete own account\n    Given the admin is logged in\n    When the admin tries to select their own account for deletion\n    Then the system prevents it with a clear error message"
+    }
+  ]
+}
+{% endmacro %}
