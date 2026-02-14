@@ -47,6 +47,7 @@ class TestCaseParser:
                 logger.warning(f"Skipping malformed test case {i}: {e}")
 
         parsed_cases = deduplicate_test_cases(parsed_cases)
+        parsed_cases = self._ensure_required_coverage(parsed_cases, request)
 
         breakdown = {}
         for tc in parsed_cases:
@@ -66,6 +67,111 @@ class TestCaseParser:
             project_id=request.project_id,
             task_id=request.task_id,
         )
+
+    def _normalize_scenario_type(self, raw: dict) -> ScenarioType:
+        raw_type = str(raw.get("scenario_type", "")).strip().lower().replace(" ", "_")
+        aliases = {
+            "happy": ScenarioType.HAPPY_PATH,
+            "happy_path": ScenarioType.HAPPY_PATH,
+            "positive": ScenarioType.HAPPY_PATH,
+            "negative": ScenarioType.NEGATIVE,
+            "error": ScenarioType.NEGATIVE,
+            "failure": ScenarioType.NEGATIVE,
+            "invalid": ScenarioType.NEGATIVE,
+            "edge": ScenarioType.EDGE_CASE,
+            "edge_case": ScenarioType.EDGE_CASE,
+            "boundary": ScenarioType.BOUNDARY,
+            "security": ScenarioType.SECURITY,
+            "performance": ScenarioType.PERFORMANCE,
+        }
+        if raw_type in aliases:
+            return aliases[raw_type]
+
+        title_text = str(raw.get("title", "")).lower()
+        tags_raw = raw.get("tags", [])
+        tags_text = " ".join(tags_raw).lower() if isinstance(tags_raw, list) else str(tags_raw).lower()
+        hint_text = f"{title_text} {tags_text}"
+
+        if any(k in hint_text for k in ["edge", "boundary", "limit", "corner", "extreme"]):
+            return ScenarioType.EDGE_CASE
+        if any(k in hint_text for k in ["invalid", "error", "fail", "reject", "unauthorized"]):
+            return ScenarioType.NEGATIVE
+        if any(k in hint_text for k in ["security", "xss", "csrf", "injection"]):
+            return ScenarioType.SECURITY
+        if any(k in hint_text for k in ["performance", "load", "latency", "stress"]):
+            return ScenarioType.PERFORMANCE
+
+        return ScenarioType.HAPPY_PATH
+
+    def _build_fallback_case(self, scenario_type: ScenarioType, request: GenerateRequest) -> TestCase:
+        base_precondition = [f"User is on {request.component_context}"]
+
+        if scenario_type == ScenarioType.NEGATIVE:
+            title = "Reject invalid input and return clear error"
+            steps = [
+                TestStep(
+                    step_number=1,
+                    action="Submit invalid or unauthorized input",
+                    expected_result="System rejects the request with a clear error message",
+                ),
+                TestStep(
+                    step_number=2,
+                    action="Check application state after rejection",
+                    expected_result="No unintended data or state change is observed",
+                ),
+            ]
+        elif scenario_type == ScenarioType.EDGE_CASE:
+            title = "Handle boundary values without breaking flow"
+            steps = [
+                TestStep(
+                    step_number=1,
+                    action="Submit boundary or extreme input values",
+                    expected_result="System handles input gracefully without crashing",
+                ),
+                TestStep(
+                    step_number=2,
+                    action="Verify feedback for out-of-range conditions",
+                    expected_result="User receives deterministic and understandable validation feedback",
+                ),
+            ]
+        else:
+            title = "Complete primary user flow successfully"
+            steps = [
+                TestStep(
+                    step_number=1,
+                    action="Perform the primary action with valid input",
+                    expected_result="Operation succeeds and expected output is produced",
+                )
+            ]
+
+        return TestCase(
+            title=title,
+            scenario_type=scenario_type,
+            severity=SEVERITY_DEFAULTS.get(scenario_type, Severity.MINOR),
+            priority=request.priority.value,
+            preconditions=base_precondition,
+            steps=steps,
+            tags=[scenario_type.value, "fallback"],
+            is_edge_case=scenario_type in (ScenarioType.EDGE_CASE, ScenarioType.BOUNDARY),
+            component=request.component_context,
+        )
+
+    def _ensure_required_coverage(
+        self, parsed_cases: list[TestCase], request: GenerateRequest
+    ) -> list[TestCase]:
+        required_types = [ScenarioType.HAPPY_PATH, ScenarioType.NEGATIVE, ScenarioType.EDGE_CASE]
+        existing_types = {tc.scenario_type for tc in parsed_cases}
+
+        for required in required_types:
+            if required not in existing_types:
+                logger.warning(
+                    "Coverage fallback: adding missing %s case",
+                    required.value,
+                )
+                parsed_cases.append(self._build_fallback_case(required, request))
+                existing_types.add(required)
+
+        return parsed_cases
 
     def _parse_single_case(
         self, raw: dict, request: GenerateRequest, index: int
@@ -91,11 +197,7 @@ class TestCaseParser:
             )
             steps.append(step)
 
-        scenario_type_str = raw.get("scenario_type", "happy_path")
-        try:
-            scenario_type = ScenarioType(scenario_type_str)
-        except ValueError:
-            scenario_type = ScenarioType.HAPPY_PATH
+        scenario_type = self._normalize_scenario_type(raw)
 
         severity_str = raw.get("severity", "")
         try:
