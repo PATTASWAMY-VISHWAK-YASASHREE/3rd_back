@@ -8,7 +8,7 @@ Jinja2
 aiosqlite
 sqlalchemy[asyncio]
 python-dotenv
-pytest==8.3.4
+pytest
 pytest-asyncio
 httpx
 PyGithub
