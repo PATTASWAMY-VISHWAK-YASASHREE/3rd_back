@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     github_models_rpd_limit: int = 150
     github_models_max_output_tokens: int = 2048
     github_models_temperature: float = 0.0
+    github_models_max_retries: int = 2
+    github_models_enable_gap_fill: bool = False
 
     # GitHub Context
     github_token: Optional[str] = None

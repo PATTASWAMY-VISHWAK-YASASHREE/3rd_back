@@ -33,6 +33,13 @@ class TestCaseParser:
         parsed_cases: list[TestCase] = []
 
         for i, raw_case in enumerate(raw_cases):
+            if not isinstance(raw_case, dict):
+                logger.warning(
+                    "Skipping malformed test case %s: expected object, got %s",
+                    i,
+                    type(raw_case).__name__,
+                )
+                continue
             try:
                 tc = self._parse_single_case(raw_case, request, i)
                 parsed_cases.append(tc)
@@ -65,13 +72,22 @@ class TestCaseParser:
     ) -> TestCase:
         steps = []
         for j, raw_step in enumerate(raw.get("steps", [])):
+            if isinstance(raw_step, dict):
+                action = raw_step.get("action", f"Step {j+1}")
+                input_data = raw_step.get("input_data")
+                expected_result = raw_step.get(
+                    "expected_result", "Result not specified"
+                )
+            else:
+                action = str(raw_step)
+                input_data = None
+                expected_result = "Result not specified"
+
             step = TestStep(
                 step_number=j + 1,
-                action=raw_step.get("action", f"Step {j+1}"),
-                input_data=raw_step.get("input_data"),
-                expected_result=raw_step.get(
-                    "expected_result", "Result not specified"
-                ),
+                action=action,
+                input_data=input_data,
+                expected_result=expected_result,
             )
             steps.append(step)
 
@@ -87,15 +103,31 @@ class TestCaseParser:
         except ValueError:
             severity = SEVERITY_DEFAULTS.get(scenario_type, Severity.MINOR)
 
+        preconditions_raw = raw.get("preconditions", [])
+        if isinstance(preconditions_raw, str):
+            preconditions = [preconditions_raw]
+        elif isinstance(preconditions_raw, list):
+            preconditions = [str(item) for item in preconditions_raw]
+        else:
+            preconditions = []
+
+        tags_raw = raw.get("tags", [])
+        if isinstance(tags_raw, str):
+            tags = [tags_raw]
+        elif isinstance(tags_raw, list):
+            tags = [str(item) for item in tags_raw]
+        else:
+            tags = []
+
         return TestCase(
             test_id=f"TC-{uuid.uuid4().hex[:8].upper()}",
             title=raw.get("title", f"Test Case {index + 1}"),
             scenario_type=scenario_type,
             severity=severity,
             priority=request.priority.value,
-            preconditions=raw.get("preconditions", []),
+            preconditions=preconditions,
             steps=steps,
-            tags=raw.get("tags", []),
+            tags=tags,
             is_edge_case=raw.get("is_edge_case", False)
             or scenario_type
             in (ScenarioType.EDGE_CASE, ScenarioType.BOUNDARY),

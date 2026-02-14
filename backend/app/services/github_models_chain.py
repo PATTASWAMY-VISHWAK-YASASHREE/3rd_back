@@ -59,6 +59,8 @@ class GitHubModelsChain:
         self.settings = get_settings()
         self.prompt_builder = PromptBuilder()
         self.model_name = self.settings.github_models_model
+        self.max_retries = max(self.settings.github_models_max_retries, 1)
+        self.enable_gap_fill = bool(self.settings.github_models_enable_gap_fill)
         self.token = (self.settings.github_models_token or "").strip()
         if not self.token:
             raise RuntimeError("No GitHub Models token configured")
@@ -81,6 +83,11 @@ class GitHubModelsChain:
             "Rate limits: %s RPM, %s requests/day",
             self.settings.github_models_rpm_limit,
             self.settings.github_models_rpd_limit,
+        )
+        logger.info(
+            "Generation options: retries=%s, gap_fill=%s",
+            self.max_retries,
+            self.enable_gap_fill,
         )
 
     def _headers(self) -> dict[str, str]:
@@ -129,9 +136,9 @@ class GitHubModelsChain:
         except Exception:
             return response.text[:500]
 
-    async def _call_model(self, prompt: str, max_retries: int = 3) -> str:
+    async def _call_model(self, prompt: str) -> str:
         last_error = None
-        for attempt in range(max_retries):
+        for attempt in range(self.max_retries):
             try:
                 await GitHubModelsChain._rate_limiter.acquire()
                 payload = {
@@ -160,11 +167,11 @@ class GitHubModelsChain:
                 logger.error(
                     "GitHub Models error (attempt %s/%s): %s",
                     attempt + 1,
-                    max_retries,
+                    self.max_retries,
                     last_error,
                 )
 
-                if response.status_code == 429 and attempt < max_retries - 1:
+                if response.status_code == 429 and attempt < self.max_retries - 1:
                     wait_time = (2 ** attempt) * 3
                     await asyncio.sleep(wait_time)
                     continue
@@ -175,10 +182,10 @@ class GitHubModelsChain:
                 logger.error(
                     "GitHub Models request failed (attempt %s/%s): %s",
                     attempt + 1,
-                    max_retries,
+                    self.max_retries,
                     e,
                 )
-                if attempt < max_retries - 1:
+                if attempt < self.max_retries - 1:
                     await asyncio.sleep(2 ** attempt)
                     continue
                 break
@@ -203,7 +210,8 @@ class GitHubModelsChain:
                     f"Raw output: {raw_response_2[:500]}"
                 )
 
-        parsed = await self._fill_coverage_gaps(parsed, request)
+        if self.enable_gap_fill:
+            parsed = await self._fill_coverage_gaps(parsed, request)
         return parsed
 
     def _extract_json(self, raw: str) -> Optional[dict]:

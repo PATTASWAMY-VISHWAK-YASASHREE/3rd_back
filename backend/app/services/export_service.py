@@ -13,6 +13,9 @@ from app.models.test_case_models import TestSuiteResponse
 
 
 class ExportService:
+    @staticmethod
+    def _single_line(text: str) -> str:
+        return " ".join(str(text).splitlines()).strip()
 
     def to_json(self, suite: TestSuiteResponse) -> str:
         """Export as formatted JSON string."""
@@ -137,10 +140,13 @@ class ExportService:
             lines.append(f'    """')
 
             for step in tc.steps:
-                lines.append(f"    # Step {step.step_number}: {step.action}")
+                action = self._single_line(step.action)
+                expected = self._single_line(step.expected_result)
+                lines.append(f"    # Step {step.step_number}: {action}")
                 if step.input_data:
-                    lines.append(f"    # Input: {step.input_data}")
-                lines.append(f"    # Expected: {step.expected_result}")
+                    input_data = self._single_line(step.input_data)
+                    lines.append(f"    # Input: {input_data}")
+                lines.append(f"    # Expected: {expected}")
                 lines.append(f"    pass  # TODO: implement")
                 lines.append("")
 
