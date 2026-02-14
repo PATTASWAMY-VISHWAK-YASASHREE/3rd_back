@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional
 from enum import Enum
 
@@ -18,6 +18,26 @@ class TestFormat(str, Enum):
 
 class GenerateRequest(BaseModel):
     """Exactly what the user submits from the React form."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "user_story": "As a user, I want to log in so that I can access my dashboard.",
+                "acceptance_criteria": [
+                    "Given valid credentials, login succeeds",
+                    "Given invalid credentials, an error message is shown",
+                ],
+                "component_context": "Login Page",
+                "priority": "P1",
+                "target_format": "gherkin",
+                "project_id": None,
+                "task_id": None,
+                "github_repo": None,
+                "github_file_path": None,
+                "github_token": None,
+            }
+        }
+    )
 
     user_story: str = Field(
         ...,

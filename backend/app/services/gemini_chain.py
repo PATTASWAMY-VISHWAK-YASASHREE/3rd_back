@@ -13,9 +13,13 @@ import json
 import asyncio
 import logging
 import time
+import warnings
 from typing import Optional
 
-import google.generativeai as genai
+# Upstream package emits a deprecation warning on import.
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", FutureWarning)
+    import google.generativeai as genai
 
 from app.config import get_settings
 from app.services.prompt_builder import PromptBuilder

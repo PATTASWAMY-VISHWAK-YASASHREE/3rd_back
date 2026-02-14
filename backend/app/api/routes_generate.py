@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Optional
 
 from app.models.request_models import GenerateRequest
 from app.models.test_case_models import TestSuiteResponse
@@ -15,6 +16,16 @@ from app.services.github_service import GitHubService
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _clean_optional_text(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    if not cleaned or cleaned.lower() in {"string", "none", "null"}:
+        return None
+    return cleaned
+
 
 @router.post("/generate", response_model=TestSuiteResponse)
 async def generate_tests(
@@ -36,22 +47,26 @@ async def generate_tests(
 
         # Fetch GitHub context if provided
         context_code = None
-        if request.github_repo and request.github_file_path:
+        repo_name = _clean_optional_text(request.github_repo)
+        file_path = _clean_optional_text(request.github_file_path)
+        if repo_name and file_path:
             try:
                 # Use token from request if provided, else from config/env
-                token = request.github_token
+                token = _clean_optional_text(request.github_token)
                 gh_service = GitHubService(token=token)
                 context_code = gh_service.fetch_file_content(
-                    request.github_repo, 
-                    request.github_file_path
+                    repo_name,
+                    file_path
                 )
-                logger.info(f"Fetched {len(context_code)} chars from {request.github_file_path}")
+                logger.info(f"Fetched {len(context_code)} chars from {file_path}")
             except Exception as e:
                 logger.error(f"Failed to fetch GitHub context: {e}")
                 # Don't fail the whole request, just warn and proceed without context
                 # or maybe we SHOULD fail? User explicitly asked for it. 
                 # Let's append a warning to the story context? 
                 # For now, let's log and proceed, effectively falling back to black-box.
+        elif request.github_repo or request.github_file_path:
+            logger.warning("Skipping GitHub context fetch due to invalid github_repo/github_file_path values")
 
         raw_data = await gemini_chain.generate(request, context_code=context_code)
         suite = parser.parse(raw_data, request)

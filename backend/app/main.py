@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
@@ -42,6 +42,21 @@ app.include_router(routes_tests.router)
 app.include_router(routes_runner.router)
 app.include_router(auth_router)
 app.include_router(github_router)
+
+
+@app.get("/", include_in_schema=False)
+async def root():
+    return {"status": "ok", "health": "/health"}
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.get("/.well-known/appspecific/com.chrome.devtools.json", include_in_schema=False)
+async def chrome_devtools_probe():
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.get("/health")
