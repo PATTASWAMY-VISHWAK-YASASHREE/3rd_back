@@ -1,0 +1,12 @@
+# Local env files (never commit)
+.env
+.env.github-models
+
+# Local standalone GitHub Models test helpers
+scripts/github_models_probe.py
+scripts/github_models_ratelimit_probe.py
+scripts/__pycache__/
+
+# Python cache
+__pycache__/
+*.pyc

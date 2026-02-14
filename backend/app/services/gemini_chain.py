@@ -14,6 +14,7 @@ import asyncio
 import logging
 import time
 import warnings
+from datetime import date
 from typing import Optional
 
 # Upstream package emits a deprecation warning on import.
@@ -29,16 +30,29 @@ logger = logging.getLogger(__name__)
 
 
 class RateLimiter:
-    """Simple token-bucket rate limiter for API calls."""
+    """Simple rate limiter for API calls (RPM pacing + daily cap)."""
 
-    def __init__(self, rpm: int):
+    def __init__(self, rpm: int, rpd: int):
         self.rpm = max(rpm, 1)
+        self.rpd = max(rpd, 1)
         self.interval = 60.0 / self.rpm
         self._last_request_time = 0.0
+        self._window_day = date.today()
+        self._requests_today = 0
         self._lock = asyncio.Lock()
 
     async def acquire(self):
         async with self._lock:
+            today = date.today()
+            if today != self._window_day:
+                self._window_day = today
+                self._requests_today = 0
+
+            if self._requests_today >= self.rpd:
+                raise RuntimeError(
+                    f"Gemini daily request limit reached ({self.rpd} requests/day)."
+                )
+
             now = time.monotonic()
             elapsed = now - self._last_request_time
             if elapsed < self.interval:
@@ -46,6 +60,7 @@ class RateLimiter:
                 logger.debug(f"Rate limiter: waiting {wait_time:.1f}s")
                 await asyncio.sleep(wait_time)
             self._last_request_time = time.monotonic()
+            self._requests_today += 1
 
 
 class GeminiChain:
@@ -69,11 +84,19 @@ class GeminiChain:
 
         # Shared rate limiter
         if GeminiChain._rate_limiter is None:
-            GeminiChain._rate_limiter = RateLimiter(rpm=self.settings.gemini_rpm_limit)
+            GeminiChain._rate_limiter = RateLimiter(
+                rpm=self.settings.gemini_rpm_limit,
+                rpd=self.settings.gemini_rpd_limit,
+            )
 
         masked_keys = [k[:4] + "***" + k[-4:] if len(k) > 8 else "***" for k in self.api_keys]
         logger.info(f"GeminiChain initialized with {len(self.api_keys)} keys: {masked_keys}")
         logger.info(f"Models: {self.all_model_names}")
+        logger.info(
+            "Rate limits: %s RPM, %s requests/day",
+            self.settings.gemini_rpm_limit,
+            self.settings.gemini_rpd_limit,
+        )
 
     def _create_model(self, model_name: str):
         return genai.GenerativeModel(

@@ -5,9 +5,11 @@ from typing import Optional
 from app.models.request_models import GenerateRequest
 from app.models.test_case_models import TestSuiteResponse
 from app.services.gemini_chain import GeminiChain
+from app.services.github_models_chain import GitHubModelsChain
 from app.services.test_parser import TestCaseParser
 from app.store.database import get_session
 from app.store.repository import TestSuiteRepository
+from app.config import get_settings
 
 router = APIRouter(prefix="/tests", tags=["Test Generation"])
 
@@ -27,6 +29,18 @@ def _clean_optional_text(value: Optional[str]) -> Optional[str]:
     return cleaned
 
 
+def _build_generation_chain():
+    settings = get_settings()
+    provider = settings.llm_provider.strip().lower()
+    has_models_token = bool((settings.github_models_token or "").strip())
+    if provider == "github_models" or (provider == "auto" and has_models_token):
+        logger.info("Using GitHub Models provider for test generation")
+        return GitHubModelsChain()
+
+    logger.info("Using Gemini provider for test generation")
+    return GeminiChain()
+
+
 @router.post("/generate", response_model=TestSuiteResponse)
 async def generate_tests(
     request: GenerateRequest,
@@ -42,7 +56,7 @@ async def generate_tests(
     6. Return full suite
     """
     try:
-        gemini_chain = GeminiChain()
+        generation_chain = _build_generation_chain()
         parser = TestCaseParser()
 
         # Fetch GitHub context if provided
@@ -68,7 +82,7 @@ async def generate_tests(
         elif request.github_repo or request.github_file_path:
             logger.warning("Skipping GitHub context fetch due to invalid github_repo/github_file_path values")
 
-        raw_data = await gemini_chain.generate(request, context_code=context_code)
+        raw_data = await generation_chain.generate(request, context_code=context_code)
         suite = parser.parse(raw_data, request)
 
         repo = TestSuiteRepository(session)
