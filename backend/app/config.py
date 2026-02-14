@@ -41,12 +41,19 @@ class Settings(BaseSettings):
     github_models_rpm_limit: int = 2
     github_models_rpd_limit: int = 150
     github_models_max_output_tokens: int = 2048
+    github_models_max_input_tokens: int = 12000
     github_models_temperature: float = 0.0
     github_models_max_retries: int = 2
     github_models_enable_gap_fill: bool = False
+    github_models_enable_json_schema: bool = True
+    github_models_json_schema_strict: bool = False
+    github_models_strict_quality_mode: bool = False
+    github_models_min_cases: int = 3
 
     # GitHub Context
     github_token: Optional[str] = None
+    github_context_related_files: int = 2
+    github_context_max_file_chars: int = 12000
     github_app_id: Optional[str] = None
     github_client_id: Optional[str] = None
     github_client_secret: Optional[str] = None

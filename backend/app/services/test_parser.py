@@ -27,10 +27,24 @@ SEVERITY_DEFAULTS = {
 
 
 class TestCaseParser:
-    def parse(self, raw_data: dict, request: GenerateRequest) -> TestSuiteResponse:
+    def parse(
+        self,
+        raw_data: dict,
+        request: GenerateRequest,
+        strict_mode: bool = False,
+        min_cases: int = 3,
+    ) -> TestSuiteResponse:
         """Transforms raw Gemini JSON → validated TestSuiteResponse."""
         raw_cases = raw_data.get("test_cases", [])
+        if not isinstance(raw_cases, list):
+            logger.warning(
+                "Model output 'test_cases' is %s, expected list; coercing to empty list",
+                type(raw_cases).__name__,
+            )
+            raw_cases = []
+
         parsed_cases: list[TestCase] = []
+        malformed_count = 0
 
         for i, raw_case in enumerate(raw_cases):
             if not isinstance(raw_case, dict):
@@ -39,15 +53,46 @@ class TestCaseParser:
                     i,
                     type(raw_case).__name__,
                 )
+                malformed_count += 1
                 continue
             try:
                 tc = self._parse_single_case(raw_case, request, i)
                 parsed_cases.append(tc)
             except Exception as e:
                 logger.warning(f"Skipping malformed test case {i}: {e}")
+                malformed_count += 1
 
+        pre_dedupe_count = len(parsed_cases)
         parsed_cases = deduplicate_test_cases(parsed_cases)
-        parsed_cases = self._ensure_required_coverage(parsed_cases, request)
+        dedup_removed = max(pre_dedupe_count - len(parsed_cases), 0)
+        missing_required = self._missing_required_types(parsed_cases)
+        coverage_added = 0
+
+        if strict_mode:
+            required_count = max(min_cases, 1)
+            if len(parsed_cases) < required_count:
+                raise ValueError(
+                    f"Strict mode: generated only {len(parsed_cases)} valid cases; minimum required is {required_count}."
+                )
+            if missing_required:
+                missing_text = ", ".join(m.value for m in missing_required)
+                raise ValueError(
+                    f"Strict mode: missing required scenario types: {missing_text}."
+                )
+        else:
+            parsed_cases, coverage_added = self._ensure_required_coverage(
+                parsed_cases, request
+            )
+
+        logger.info(
+            "Parser quality metrics: raw=%s parsed=%s malformed=%s dedup_removed=%s coverage_added=%s strict_mode=%s",
+            len(raw_cases),
+            len(parsed_cases),
+            malformed_count,
+            dedup_removed,
+            coverage_added,
+            strict_mode,
+        )
 
         breakdown = {}
         for tc in parsed_cases:
@@ -158,9 +203,10 @@ class TestCaseParser:
 
     def _ensure_required_coverage(
         self, parsed_cases: list[TestCase], request: GenerateRequest
-    ) -> list[TestCase]:
+    ) -> tuple[list[TestCase], int]:
         required_types = [ScenarioType.HAPPY_PATH, ScenarioType.NEGATIVE, ScenarioType.EDGE_CASE]
         existing_types = {tc.scenario_type for tc in parsed_cases}
+        added_count = 0
 
         for required in required_types:
             if required not in existing_types:
@@ -170,8 +216,9 @@ class TestCaseParser:
                 )
                 parsed_cases.append(self._build_fallback_case(required, request))
                 existing_types.add(required)
+                added_count += 1
 
-        return parsed_cases
+        return parsed_cases, added_count
 
     def _parse_single_case(
         self, raw: dict, request: GenerateRequest, index: int
@@ -237,3 +284,8 @@ class TestCaseParser:
             gherkin=raw.get("gherkin"),
             pytest_code=raw.get("pytest_code"),
         )
+
+    def _missing_required_types(self, parsed_cases: list[TestCase]) -> list[ScenarioType]:
+        required_types = [ScenarioType.HAPPY_PATH, ScenarioType.NEGATIVE, ScenarioType.EDGE_CASE]
+        existing_types = {tc.scenario_type for tc in parsed_cases}
+        return [required for required in required_types if required not in existing_types]

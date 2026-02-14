@@ -17,6 +17,84 @@ from app.services.prompt_builder import PromptBuilder
 
 logger = logging.getLogger(__name__)
 
+TEST_SUITE_JSON_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["user_story_summary", "test_cases"],
+    "properties": {
+        "user_story_summary": {"type": "string"},
+        "test_cases": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "title",
+                    "scenario_type",
+                    "severity",
+                    "preconditions",
+                    "steps",
+                    "tags",
+                    "is_edge_case",
+                ],
+                "properties": {
+                    "title": {"type": "string"},
+                    "scenario_type": {
+                        "type": "string",
+                        "enum": [
+                            "happy_path",
+                            "negative",
+                            "edge_case",
+                            "boundary",
+                            "security",
+                            "performance",
+                        ],
+                    },
+                    "severity": {
+                        "type": "string",
+                        "enum": ["critical", "major", "minor", "trivial"],
+                    },
+                    "preconditions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "steps": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["step_number", "action", "expected_result"],
+                            "properties": {
+                                "step_number": {"type": "integer", "minimum": 1},
+                                "action": {"type": "string"},
+                                "input_data": {"type": ["string", "null"]},
+                                "expected_result": {"type": "string"},
+                            },
+                        },
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "is_edge_case": {"type": "boolean"},
+                    "gherkin": {"type": ["string", "null"]},
+                    "pytest_code": {"type": ["string", "null"]},
+                },
+            },
+        },
+    },
+}
+
+GAP_FILL_JSON_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["test_cases"],
+    "properties": {
+        "test_cases": TEST_SUITE_JSON_SCHEMA["properties"]["test_cases"],
+    },
+}
+
 
 class RateLimiter:
     """Simple rate limiter for API calls (RPM pacing + daily cap)."""
@@ -60,7 +138,12 @@ class GitHubModelsChain:
         self.prompt_builder = PromptBuilder()
         self.model_name = self.settings.github_models_model
         self.max_retries = max(self.settings.github_models_max_retries, 1)
+        self.max_input_tokens = max(self.settings.github_models_max_input_tokens, 512)
         self.enable_gap_fill = bool(self.settings.github_models_enable_gap_fill)
+        self.enable_json_schema = bool(self.settings.github_models_enable_json_schema)
+        self.json_schema_strict = bool(self.settings.github_models_json_schema_strict)
+        self.strict_quality_mode = bool(self.settings.github_models_strict_quality_mode)
+        self.min_cases = max(self.settings.github_models_min_cases, 1)
         self.token = (self.settings.github_models_token or "").strip()
         if not self.token:
             raise RuntimeError("No GitHub Models token configured")
@@ -85,9 +168,12 @@ class GitHubModelsChain:
             self.settings.github_models_rpd_limit,
         )
         logger.info(
-            "Generation options: retries=%s, gap_fill=%s",
+            "Generation options: retries=%s, gap_fill=%s, json_schema=%s, strict_mode=%s, max_input_tokens=%s",
             self.max_retries,
             self.enable_gap_fill,
+            self.enable_json_schema,
+            self.strict_quality_mode,
+            self.max_input_tokens,
         )
 
     def _headers(self) -> dict[str, str]:
@@ -107,6 +193,86 @@ class GitHubModelsChain:
         if "gpt-5" in self.model_name.lower():
             return {}
         return {"temperature": self.settings.github_models_temperature}
+
+    def _build_messages(self, prompt: str) -> list[dict[str, str]]:
+        system_prompt = (
+            "You are a senior QA automation engineer. "
+            "Generate comprehensive, diverse test cases with strong negative and edge coverage. "
+            "Return only JSON with no markdown wrappers."
+        )
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+
+    def _response_format_payload(self) -> dict:
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "generated_test_suite",
+                "strict": self.json_schema_strict,
+                "schema": TEST_SUITE_JSON_SCHEMA,
+            },
+        }
+
+    def _gap_fill_response_format_payload(self) -> dict:
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "generated_gap_fill_cases",
+                "strict": self.json_schema_strict,
+                "schema": GAP_FILL_JSON_SCHEMA,
+            },
+        }
+
+    def _is_response_format_error(self, message: str) -> bool:
+        lowered = (message or "").lower()
+        return any(
+            key in lowered
+            for key in [
+                "response_format",
+                "json_schema",
+                "schema",
+                "invalid parameter",
+                "unsupported",
+            ]
+        )
+
+    def _build_prompt_with_budget(
+        self, request: GenerateRequest, context_code: Optional[str]
+    ) -> str:
+        prompt = self.prompt_builder.build(request, context_code=context_code)
+        estimated_tokens = self.prompt_builder.estimate_tokens(prompt)
+        if estimated_tokens <= self.max_input_tokens:
+            return prompt
+
+        base_prompt = self.prompt_builder.build(request, context_code=None)
+        base_tokens = self.prompt_builder.estimate_tokens(base_prompt)
+        if not context_code or base_tokens >= self.max_input_tokens:
+            logger.warning(
+                "Prompt estimate %s exceeds max input tokens %s with no truncatable context",
+                estimated_tokens,
+                self.max_input_tokens,
+            )
+            return base_prompt if base_tokens < estimated_tokens else prompt
+
+        available_context_tokens = max(self.max_input_tokens - base_tokens - 128, 256)
+        max_context_chars = max(1024, available_context_tokens * 4)
+        trimmed_context = context_code[:max_context_chars]
+        if len(context_code) > max_context_chars:
+            trimmed_context += "\n\n# Context truncated to fit model token budget."
+
+        trimmed_prompt = self.prompt_builder.build(request, context_code=trimmed_context)
+        trimmed_estimate = self.prompt_builder.estimate_tokens(trimmed_prompt)
+        logger.warning(
+            "Prompt token estimate over budget (%s>%s). Context truncated from %s to %s chars (estimate=%s).",
+            estimated_tokens,
+            self.max_input_tokens,
+            len(context_code),
+            len(trimmed_context),
+            trimmed_estimate,
+        )
+        return trimmed_prompt
 
     def _extract_text(self, response_data: dict) -> str:
         choices = response_data.get("choices", [])
@@ -136,18 +302,25 @@ class GitHubModelsChain:
         except Exception:
             return response.text[:500]
 
-    async def _call_model(self, prompt: str) -> str:
+    async def _call_model(
+        self,
+        prompt: str,
+        response_format: Optional[dict] = None,
+        allow_response_format_fallback: bool = False,
+    ) -> str:
         last_error = None
         for attempt in range(self.max_retries):
             try:
                 await GitHubModelsChain._rate_limiter.acquire()
                 payload = {
                     "model": self.model_name,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "messages": self._build_messages(prompt),
                     "stream": False,
                     **self._token_limit_payload(),
                     **self._sampling_payload(),
                 }
+                if response_format:
+                    payload["response_format"] = response_format
 
                 async with httpx.AsyncClient(timeout=60.0) as client:
                     response = await client.post(
@@ -163,6 +336,22 @@ class GitHubModelsChain:
                     return text
 
                 error_message = self._error_message(response)
+                if (
+                    response_format
+                    and allow_response_format_fallback
+                    and response.status_code in (400, 422)
+                    and self._is_response_format_error(error_message)
+                ):
+                    logger.warning(
+                        "response_format rejected by model/API (%s). Retrying without schema constraints.",
+                        error_message,
+                    )
+                    return await self._call_model(
+                        prompt,
+                        response_format=None,
+                        allow_response_format_fallback=False,
+                    )
+
                 last_error = RuntimeError(f"{response.status_code} {error_message}")
                 logger.error(
                     "GitHub Models error (attempt %s/%s): %s",
@@ -193,15 +382,26 @@ class GitHubModelsChain:
         raise RuntimeError(f"GitHub Models generation failed. Last error: {last_error}")
 
     async def generate(self, request: GenerateRequest, context_code: str = None) -> dict:
-        prompt = self.prompt_builder.build(request, context_code)
+        prompt = self._build_prompt_with_budget(request, context_code)
+        response_format = (
+            self._response_format_payload() if self.enable_json_schema else None
+        )
 
-        raw_response = await self._call_model(prompt)
+        raw_response = await self._call_model(
+            prompt,
+            response_format=response_format,
+            allow_response_format_fallback=self.enable_json_schema,
+        )
         parsed = self._extract_json(raw_response)
 
         if parsed is None:
             logger.warning("Turn 1 returned invalid JSON, attempting self-correction")
             correction_prompt = self._build_correction_prompt(raw_response)
-            raw_response_2 = await self._call_model(correction_prompt)
+            raw_response_2 = await self._call_model(
+                correction_prompt,
+                response_format=response_format,
+                allow_response_format_fallback=self.enable_json_schema,
+            )
             parsed = self._extract_json(raw_response_2)
 
             if parsed is None:
@@ -276,7 +476,14 @@ MISSING scenario types: {', '.join(missing)}.
 Return them in the same JSON format as before. Return ONLY a JSON
 object with a "test_cases" array containing the new cases."""
 
-        raw = await self._call_model(gap_prompt)
+        gap_response_format = (
+            self._gap_fill_response_format_payload() if self.enable_json_schema else None
+        )
+        raw = await self._call_model(
+            gap_prompt,
+            response_format=gap_response_format,
+            allow_response_format_fallback=self.enable_json_schema,
+        )
         additional = self._extract_json(raw)
         if additional and "test_cases" in additional:
             parsed["test_cases"].extend(additional["test_cases"])

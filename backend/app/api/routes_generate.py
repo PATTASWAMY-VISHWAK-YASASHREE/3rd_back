@@ -29,6 +29,51 @@ def _clean_optional_text(value: Optional[str]) -> Optional[str]:
     return cleaned
 
 
+def _split_repo_full_name(repo_name: str) -> tuple[Optional[str], Optional[str]]:
+    if "/" not in repo_name:
+        return None, None
+    owner, repo = repo_name.split("/", 1)
+    owner = owner.strip()
+    repo = repo.strip()
+    if not owner or not repo:
+        return None, None
+    return owner, repo
+
+
+def _truncate_context(content: str, max_chars: int) -> str:
+    if len(content) <= max_chars:
+        return content
+    return content[:max_chars] + "\n\n# [File content truncated for context budget]"
+
+
+def _select_related_paths(tree: list[dict], selected_file: str, limit: int) -> list[str]:
+    if limit <= 0:
+        return []
+
+    normalized_selected = selected_file.replace("\\", "/").strip("/")
+    selected_dir = normalized_selected.rsplit("/", 1)[0] if "/" in normalized_selected else ""
+    selected_ext = normalized_selected.rsplit(".", 1)[-1].lower() if "." in normalized_selected else ""
+
+    same_ext_candidates = []
+    other_candidates = []
+    for item in tree:
+        if not isinstance(item, dict) or item.get("type") != "blob":
+            continue
+        path = str(item.get("path", "")).replace("\\", "/").strip("/")
+        if not path or path == normalized_selected:
+            continue
+        path_dir = path.rsplit("/", 1)[0] if "/" in path else ""
+        if path_dir != selected_dir:
+            continue
+
+        if selected_ext and path.lower().endswith(f".{selected_ext}"):
+            same_ext_candidates.append(path)
+        else:
+            other_candidates.append(path)
+
+    return (same_ext_candidates + other_candidates)[:limit]
+
+
 def _build_generation_chain():
     settings = get_settings()
     provider = settings.llm_provider.strip().lower()
@@ -56,6 +101,7 @@ async def generate_tests(
     6. Return full suite
     """
     try:
+        settings = get_settings()
         generation_chain = _build_generation_chain()
         parser = TestCaseParser()
 
@@ -68,11 +114,39 @@ async def generate_tests(
                 # Use token from request if provided, else from config/env
                 token = _clean_optional_text(request.github_token)
                 gh_service = GitHubService(token=token)
-                context_code = gh_service.fetch_file_content(
-                    repo_name,
-                    file_path
+                max_file_chars = max(settings.github_context_max_file_chars, 1024)
+                related_limit = max(settings.github_context_related_files, 0)
+
+                primary_content = gh_service.fetch_file_content(repo_name, file_path)
+                context_sections = [
+                    f"# FILE: {file_path}\n{_truncate_context(primary_content, max_file_chars)}"
+                ]
+
+                if related_limit > 0:
+                    owner, repo = _split_repo_full_name(repo_name)
+                    if owner and repo:
+                        try:
+                            tree = await gh_service.get_file_tree(owner, repo)
+                            related_paths = _select_related_paths(tree, file_path, related_limit)
+                            for related_path in related_paths:
+                                try:
+                                    related_content = gh_service.fetch_file_content(repo_name, related_path)
+                                    context_sections.append(
+                                        f"# FILE: {related_path}\n{_truncate_context(related_content, max_file_chars)}"
+                                    )
+                                except Exception as rel_error:
+                                    logger.warning("Skipping related context file %s: %s", related_path, rel_error)
+                        except Exception as tree_error:
+                            logger.warning("Skipping related context discovery for %s: %s", repo_name, tree_error)
+                    else:
+                        logger.warning("Skipping related context fetch due to invalid repo format: %s", repo_name)
+
+                context_code = "\n\n".join(context_sections)
+                logger.info(
+                    "Fetched context bundle: files=%s chars=%s",
+                    len(context_sections),
+                    len(context_code),
                 )
-                logger.info(f"Fetched {len(context_code)} chars from {file_path}")
             except Exception as e:
                 logger.error(f"Failed to fetch GitHub context: {e}")
                 # Don't fail the whole request, just warn and proceed without context
@@ -83,7 +157,9 @@ async def generate_tests(
             logger.warning("Skipping GitHub context fetch due to invalid github_repo/github_file_path values")
 
         raw_data = await generation_chain.generate(request, context_code=context_code)
-        suite = parser.parse(raw_data, request)
+        strict_mode = bool(getattr(generation_chain, "strict_quality_mode", False))
+        min_cases = max(int(getattr(generation_chain, "min_cases", 3)), 1)
+        suite = parser.parse(raw_data, request, strict_mode=strict_mode, min_cases=min_cases)
 
         repo = TestSuiteRepository(session)
         await repo.save(
