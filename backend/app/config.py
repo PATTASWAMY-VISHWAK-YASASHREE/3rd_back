@@ -1,8 +1,14 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=(".env", ".env.github-models"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
     llm_provider: str = "auto"  # auto | gemini | github_models
 
     gemini_api_key: str = ""
@@ -57,11 +63,9 @@ class Settings(BaseSettings):
     github_app_id: Optional[str] = None
     github_client_id: Optional[str] = None
     github_client_secret: Optional[str] = None
-    github_callback_url: str = "http://localhost:5173/github-callback.html"
-
-    class Config:
-        env_file = (".env", ".env.github-models")
-        env_file_encoding = "utf-8"
+    github_callback_url: str = "http://localhost:5173/dashboard"
+    github_token_cookie_name: str = "octus_github_token"
+    github_token_cookie_max_age_seconds: int = 604800
 
 
 def get_settings() -> Settings:

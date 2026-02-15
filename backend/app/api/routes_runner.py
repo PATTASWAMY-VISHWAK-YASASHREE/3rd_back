@@ -4,14 +4,16 @@ Test Runner API routes.
 - GET  /tests/runs/{run_id}/status → polls for run status + results
 """
 
-from fastapi import APIRouter, HTTPException, Query, Header
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from app.services.test_runner_service import TestRunnerService
 from app.services.export_service import ExportService
 from app.store.database import get_session
 from app.store.repository import TestSuiteRepository
 from sqlalchemy.ext.asyncio import AsyncSession
-from fastapi import Depends
 from typing import Optional
+
+from app.config import get_settings
+from app.services.github_service import resolve_github_token
 
 import logging
 
@@ -23,6 +25,7 @@ router = APIRouter(prefix="/tests", tags=["Test Runner"])
 @router.post("/{suite_id}/run")
 async def run_tests(
     suite_id: str,
+    request: Request,
     repo: str = Query(..., description="GitHub repo (owner/repo)"),
     token: Optional[str] = Query(default=None, description="GitHub access token"),
     x_github_token: Optional[str] = Header(default=None, alias="X-GitHub-Token"),
@@ -36,11 +39,21 @@ async def run_tests(
     4. Returns run_id for polling
     """
     try:
-        github_token = x_github_token or token
+        settings = get_settings()
+        cookie_token = request.cookies.get(settings.github_token_cookie_name)
+        github_token = resolve_github_token(
+            x_github_token,
+            cookie_token,
+            token,
+            settings.github_token,
+        )
         if not github_token:
             raise HTTPException(
                 status_code=422,
-                detail="Missing GitHub token. Send as query 'token' or header 'X-GitHub-Token'.",
+                detail=(
+                    "Missing GitHub token. Send query 'token', header 'X-GitHub-Token', "
+                    "or authenticate once via /auth/github/callback cookie."
+                ),
             )
 
         # Load suite from DB
@@ -85,17 +98,28 @@ async def run_tests(
 @router.get("/runs/{run_id}/status")
 async def get_run_status(
     run_id: int,
+    request: Request,
     repo: str = Query(..., description="GitHub repo (owner/repo)"),
     token: Optional[str] = Query(default=None, description="GitHub access token"),
     x_github_token: Optional[str] = Header(default=None, alias="X-GitHub-Token"),
 ):
     """Returns the current status and results of a GitHub Actions workflow run."""
     try:
-        github_token = x_github_token or token
+        settings = get_settings()
+        cookie_token = request.cookies.get(settings.github_token_cookie_name)
+        github_token = resolve_github_token(
+            x_github_token,
+            cookie_token,
+            token,
+            settings.github_token,
+        )
         if not github_token:
             raise HTTPException(
                 status_code=422,
-                detail="Missing GitHub token. Send as query 'token' or header 'X-GitHub-Token'.",
+                detail=(
+                    "Missing GitHub token. Send query 'token', header 'X-GitHub-Token', "
+                    "or authenticate once via /auth/github/callback cookie."
+                ),
             )
 
         runner = TestRunnerService(token=github_token)

@@ -6,6 +6,7 @@ Uses httpx for async HTTP calls to the GitHub API.
 import httpx
 import logging
 from typing import Optional
+from urllib.parse import urlencode, urlparse, urlunparse
 from github import Github, Auth
 from github.GithubException import GithubException
 
@@ -16,6 +17,13 @@ logger = logging.getLogger(__name__)
 GITHUB_OAUTH_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 GITHUB_OAUTH_TOKEN_URL = "https://github.com/login/oauth/access_token"
 GITHUB_API_BASE = "https://api.github.com"
+
+
+def resolve_github_token(*token_candidates: Optional[str]) -> Optional[str]:
+    for token in token_candidates:
+        if token and token.strip():
+            return token.strip()
+    return None
 
 
 class GitHubService:
@@ -29,25 +37,38 @@ class GitHubService:
             self.headers["Authorization"] = f"Bearer {token}"
 
     @staticmethod
-    def get_oauth_url(state: str = "") -> str:
+    def get_dashboard_callback_url() -> str:
+        """Returns canonical dashboard callback URL for OAuth."""
+        settings = get_settings()
+        configured = (settings.github_callback_url or "").strip()
+        parsed = urlparse(configured)
+        if not parsed.scheme or not parsed.netloc:
+            raise ValueError("Invalid GITHUB_CALLBACK_URL configuration")
+        # Force canonical dashboard path to avoid per-project/session callback URLs.
+        return urlunparse((parsed.scheme, parsed.netloc, "/dashboard", "", "", ""))
+
+    @staticmethod
+    def get_oauth_url(state: str = "", redirect_uri: Optional[str] = None) -> str:
         """Returns the GitHub OAuth authorization URL for the user to visit."""
         settings = get_settings()
+        effective_redirect_uri = GitHubService.get_dashboard_callback_url()
         params = {
             "client_id": settings.github_client_id,
-            "redirect_uri": settings.github_callback_url,
-            "scope": "repo read:org",
+            "redirect_uri": effective_redirect_uri,
+            "scope": "repo workflow read:org",
             "state": state,
         }
-        query = "&".join(f"{k}={v}" for k, v in params.items())
+        query = urlencode(params)
         return f"{GITHUB_OAUTH_AUTHORIZE_URL}?{query}"
 
     @staticmethod
-    async def exchange_code_for_token(code: str) -> dict:
+    async def exchange_code_for_token(code: str, redirect_uri: Optional[str] = None) -> dict:
         """
         Exchanges the OAuth authorization code for an access token.
         Returns: { "access_token": "...", "token_type": "bearer", "scope": "..." }
         """
         settings = get_settings()
+        effective_redirect_uri = GitHubService.get_dashboard_callback_url()
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 GITHUB_OAUTH_TOKEN_URL,
@@ -55,7 +76,7 @@ class GitHubService:
                     "client_id": settings.github_client_id,
                     "client_secret": settings.github_client_secret,
                     "code": code,
-                    "redirect_uri": settings.github_callback_url,
+                    "redirect_uri": effective_redirect_uri,
                 },
                 headers={"Accept": "application/json"},
             )

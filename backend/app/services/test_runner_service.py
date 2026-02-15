@@ -184,7 +184,7 @@ class TestRunnerService:
             msg = self._extract_error_message(resp)
             if resp.status_code in (401, 403):
                 raise PermissionError(
-                    "GitHub token does not have permission to create branches."
+                    f"GitHub token does not have permission to create branches: {msg}"
                 )
             raise ValueError(f"Failed to create branch: {msg}")
 
@@ -235,11 +235,11 @@ class TestRunnerService:
             ):
                 raise PermissionError(
                     "GitHub token is missing 'workflow' permission. "
-                    "Recreate token with workflow access and try again."
+                    f"Recreate token with workflow access and try again. ({msg})"
                 )
             if resp.status_code in (401, 403):
                 raise PermissionError(
-                    f"GitHub token does not have permission to commit '{path}'."
+                    f"GitHub token does not have permission to commit '{path}': {msg}"
                 )
             raise ValueError(f"Failed to commit {path}: {msg}")
 
@@ -255,7 +255,7 @@ class TestRunnerService:
             msg = self._extract_error_message(resp)
             if resp.status_code in (401, 403):
                 raise PermissionError(
-                    "GitHub token does not have permission to trigger Actions workflows."
+                    f"GitHub token does not have permission to trigger Actions workflows: {msg}"
                 )
             if resp.status_code == 404:
                 raise ValueError(

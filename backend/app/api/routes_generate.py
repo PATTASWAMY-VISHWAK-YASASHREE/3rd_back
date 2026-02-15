@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 
@@ -14,7 +14,7 @@ from app.config import get_settings
 router = APIRouter(prefix="/tests", tags=["Test Generation"])
 
 
-from app.services.github_service import GitHubService
+from app.services.github_service import GitHubService, resolve_github_token
 import logging
 
 logger = logging.getLogger(__name__)
@@ -88,7 +88,9 @@ def _build_generation_chain():
 
 @router.post("/generate", response_model=TestSuiteResponse)
 async def generate_tests(
+    http_request: Request,
     request: GenerateRequest,
+    x_github_token: Optional[str] = Header(default=None, alias="X-GitHub-Token"),
     session: AsyncSession = Depends(get_session),
 ):
     """
@@ -112,7 +114,15 @@ async def generate_tests(
         if repo_name and file_path:
             try:
                 # Use token from request if provided, else from config/env
-                token = _clean_optional_text(request.github_token)
+                cookie_token = _clean_optional_text(
+                    http_request.cookies.get(settings.github_token_cookie_name)
+                )
+                token = resolve_github_token(
+                    _clean_optional_text(request.github_token),
+                    _clean_optional_text(x_github_token),
+                    cookie_token,
+                    _clean_optional_text(settings.github_token),
+                )
                 gh_service = GitHubService(token=token)
                 max_file_chars = max(settings.github_context_max_file_chars, 1024)
                 related_limit = max(settings.github_context_related_files, 0)
